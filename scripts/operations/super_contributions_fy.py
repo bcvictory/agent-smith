@@ -36,9 +36,13 @@ PERSONAL_DEDUCTIBLE = "personalDeductible"
 CONTRIBUTION_TAX = "contributionTax"
 FEES_AND_INSURANCE = "feesAndInsurance"
 EARNINGS = "earnings"
+# First Home Super Saver release: money withdrawn for the house deposit. Not a
+# contribution and not a fee; it does not change cap history (those dollars were
+# capped in the FY they went in).
+FHSS_RELEASE = "fhssRelease"
 OTHER = "other"
 
-BUCKETS = (EMPLOYER_SG, PERSONAL_DEDUCTIBLE, CONTRIBUTION_TAX, FEES_AND_INSURANCE, EARNINGS, OTHER)
+BUCKETS = (EMPLOYER_SG, PERSONAL_DEDUCTIBLE, CONTRIBUTION_TAX, FEES_AND_INSURANCE, EARNINGS, FHSS_RELEASE, OTHER)
 # Buckets that are contributions into the fund, and their contributionHistory type.
 CONTRIBUTION_TYPE = {EMPLOYER_SG: "employer_sg", PERSONAL_DEDUCTIBLE: "personal_deductible"}
 
@@ -76,6 +80,8 @@ def classify(payee: str, category: str, amount: float) -> str:
         return FEES_AND_INSURANCE
     if "investment earnings" in text:
         return EARNINGS
+    if text.strip() == "claim" and amount < 0 and "transfer" in category.lower():
+        return FHSS_RELEASE
     # `Member Cont` is Bailey's own concessional contribution, not employer SG.
     if "voluntary contribution" in text or "member cont" in text:
         return PERSONAL_DEDUCTIBLE

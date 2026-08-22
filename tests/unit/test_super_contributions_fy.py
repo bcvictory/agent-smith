@@ -59,6 +59,16 @@ def test_classify_falls_back_to_category_for_unnamed_employer_credit():
     assert classify("Contribution", "Super Contribution", -250.0) == "other"
 
 
+def test_classify_fhss_release_is_not_a_contribution_or_warning():
+    # 2025-09-05 First Home Super Saver release for the Huntly deposit.
+    assert classify("Claim", "Transfers", -51996.0) == "fhssRelease"
+    result = summarise([{"date": "2025-09-05", "payee": "Claim", "category": "Transfers", "amount": -51996.0}])
+    assert result["byFy"][0]["fhssRelease"] == -51996.0
+    assert result["byFy"][0]["netIntoFund"] == 0.0
+    assert result["contributions"] == []
+    assert result["warnings"] == []
+
+
 def test_classify_historical_payee_wording():
     """REST renamed most payees around 2025; the older wording must bucket the same."""
     assert classify("Contributions Tax", "Super Contribution", -342.34) == "contributionTax"
