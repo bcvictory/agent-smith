@@ -140,9 +140,15 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def find_rest_account(client: PocketSmithClient) -> dict[str, Any]:
-    for account in client.get_transaction_accounts(USER_ID):
-        if "rest" in str(account.get("name") or "").lower():
-            return {"id": account["id"], "name": account.get("name") or REST_ACCOUNT_NAME}
+    """The pinned account id wins; a name match is only the fallback if the id is
+    gone (a bare "rest" substring would also match "Interest")."""
+    accounts = client.get_transaction_accounts(USER_ID)
+    for account in accounts:
+        if account.get("id") == REST_ACCOUNT_ID:
+            return {"id": REST_ACCOUNT_ID, "name": account.get("name") or REST_ACCOUNT_NAME}
+    for account in accounts:
+        if "rest industry super" in str(account.get("name") or "").lower():
+            return {"id": account["id"], "name": account["name"]}
     return {"id": REST_ACCOUNT_ID, "name": REST_ACCOUNT_NAME}
 
 
