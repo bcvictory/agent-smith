@@ -31,6 +31,14 @@ Usage:
   uv run python -u scripts/operations/rest_super_sync.py            # dry-run
   uv run python -u scripts/operations/rest_super_sync.py --apply
   uv run python -u scripts/operations/rest_super_sync.py --full     # since 2023-07-01
+  uv run python -u scripts/operations/rest_super_sync.py --apply --opportunistic
+
+--opportunistic is the hourly launchd mode. The portal issues a 60-minute token and
+its Okta client is authorization_code only (no refresh token, confirmed 2026-09-20),
+so a session lasts hours while a weekly cron needs it alive at one exact minute: the
+old Sunday 07:30 job failed its first 3 runs for exactly that reason. This mode
+instead rides whatever session Bailey already has open, and says nothing when there
+isn't one.
 """
 
 from __future__ import annotations
@@ -164,6 +172,10 @@ def _launch_profile_chrome() -> None:
 
     Playwright `page.goto` against member.rest.com.au fails with
     net::ERR_HTTP2_PROTOCOL_ERROR; Chrome itself loads the portal fine.
+
+    --restore-last-session keeps the portal's session cookies (__Host-Http-Session,
+    ASP.NET_SessionId) across a Chrome restart; without it they die with the process
+    and every restart costs a fresh SMS login.
     """
     subprocess.run(
         [
@@ -171,6 +183,7 @@ def _launch_profile_chrome() -> None:
             f"--user-data-dir={PROFILE_DIR}",
             f"--remote-debugging-port={CDP_PORT}",
             "--no-first-run",
+            "--restore-last-session",
             DASHBOARD_URL,
         ],
         capture_output=True, timeout=30,
@@ -213,6 +226,20 @@ def _select_portal_tab() -> bool:
 def _read_okta_storage() -> str:
     data = _agent_browser_json("storage", "local", "get", "okta-token-storage")
     return str(data.get("value") or "").strip()
+
+
+def peek_token() -> str | None:
+    """Return a live access token, or None — WITHOUT ever launching Chrome.
+
+    The opportunistic probe runs hourly, so it must be silent and side-effect free:
+    no Chrome window appearing on Bailey's desktop, no navigation that could disturb
+    a live portal session. If Chrome is not already up with a portal tab, the answer
+    is simply "no token right now".
+    """
+    if not _connect_cdp() or not _select_portal_tab():
+        return None
+    token, expires_at = token_from_okta_storage(_read_okta_storage())
+    return token if token and expires_at > int(time.time()) + 60 else None
 
 
 def harvest_token() -> tuple[str | None, str]:
@@ -443,9 +470,12 @@ def notify_auth_needed(state: dict[str, Any], no_email: bool) -> None:
     if no_email or last == today or not EMAIL_TO:
         return
     body = (
-        "The weekly REST Super sync could not renew its login session.\n\n"
+        "The REST portal login session has ended, so the super sync is paused.\n\n"
+        "The portal issues a 60-minute token with no refresh token, so this is normal "
+        "and expected; the sync resumes by itself once you are logged in again.\n\n"
         "To re-auth: in the agent Chrome window (profile ~/.agent-chrome-profile), "
-        "log in at https://member.rest.com.au/ (member number + SMS code), then re-run:\n\n"
+        "log in at https://member.rest.com.au/ (member number + SMS code) and leave the "
+        "dashboard tab open. The hourly probe picks it up from there, or run it now:\n\n"
         "  cd ~/Pocketsmith/agent-smith && uv run python -u scripts/operations/rest_super_sync.py --apply\n"
     )
     msg = MIMEText(body, "plain", "utf-8")
@@ -474,7 +504,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--since", help="explicit export FromDate (YYYY-MM-DD), overrides --full/window")
     parser.add_argument("--today", default=date.today().isoformat(), help="window end (default today)")
     parser.add_argument("--no-email", action="store_true", help="suppress the auth-failure email")
+    parser.add_argument(
+        "--opportunistic", action="store_true",
+        help="hourly probe: sync only if a token is already live and a sync is due, else exit 0 quietly",
+    )
+    parser.add_argument(
+        "--min-interval-days", type=int, default=3,
+        help="in --opportunistic mode, skip if the last apply is newer than this (default 3)",
+    )
     return parser.parse_args()
+
+
+def probe_line(probe: dict[str, Any]) -> str:
+    """One line per quiet hourly probe — a full JSON block 24x a day buries the real runs."""
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    return f"[{stamp}] probe: {probe.get('action', 'unknown')}"
+
+
+def days_since(iso_date: str | None) -> float:
+    """Whole days between iso_date and today; a huge number when never/unparseable."""
+    if not iso_date:
+        return 1e6
+    try:
+        return (date.today() - date.fromisoformat(iso_date)).days
+    except ValueError:
+        return 1e6
 
 
 def main() -> int:
@@ -502,11 +556,43 @@ def main() -> int:
         "window": {"since": since, "today": args.today},
     }
 
-    token, auth_status = harvest_token()
-    report["auth"] = {"status": auth_status}
     auth_state = state.setdefault("auth", {})
+
+    if args.opportunistic:
+        # Passive: never launches Chrome, never forces a login. A dead session is the
+        # normal resting state, so it exits 0 — launchd should not see hourly failures.
+        token = peek_token()
+        was_alive = bool(auth_state.get("session_alive"))
+        auth_state["session_alive"] = token is not None
+        auth_state["last_probe_date"] = date.today().isoformat()
+        probe: dict[str, Any] = {"session_alive": token is not None, "was_alive": was_alive}
+        report["probe"] = probe
+
+        if token is None:
+            # Email only on the alive -> dead edge, so Bailey hears about it the day it
+            # happens instead of a week later, and hears about it once.
+            if was_alive:
+                notify_auth_needed(state, args.no_email)
+            probe["action"] = "skipped: no live session"
+            save_state(state)
+            print(probe_line(probe))
+            return 0
+
+        stale_days = days_since(state.get("last_apply"))
+        if stale_days < args.min_interval_days:
+            probe["action"] = f"skipped: last apply {stale_days:.0f}d ago"
+            save_state(state)
+            print(probe_line(probe))
+            return 0
+        probe["action"] = f"syncing: last apply {stale_days:.0f}d ago"
+        auth_status = "ok"
+    else:
+        token, auth_status = harvest_token()
+
+    report["auth"] = {"status": auth_status}
     auth_state["last_run_date"] = date.today().isoformat()
     auth_state["last_status"] = auth_status
+    auth_state["session_alive"] = token is not None
     if not token:
         report["error"] = "could not obtain a REST access token; manual login required"
         save_state(state)

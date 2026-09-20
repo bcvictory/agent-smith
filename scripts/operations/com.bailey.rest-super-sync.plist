@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  REST Industry Super -> PocketSmith sync, opportunistic hourly probe.
+
+  Why hourly and not weekly: the portal issues a 60-minute Okta token and its client
+  is authorization_code only (no refresh token, confirmed 2026-09-20 against
+  id.rest.com.au), so the login lives for hours. The old Sunday 07:30 job needed that
+  session alive at one exact minute per week and failed its first 3 runs. This probe
+  instead runs every hour, reads the token passively (it never launches Chrome and
+  never forces a login), and syncs only when a session happens to be open AND the
+  last apply is more than --min-interval-days old. No live session is the normal
+  resting state, so it exits 0 and stays quiet; it emails only on the alive -> dead
+  edge, via state file ~/Pocketsmith/logs/rest-super-sync-state.json.
+
+  Paths are absolute because launchd inherits almost nothing:
+    - uv and gws live in ~/.local/bin, agent-browser in /opt/homebrew/bin.
+    - POCKETSMITH_API_KEY and the REST_* values come from agent-smith/.env.
+  Install:
+    cp scripts/operations/com.bailey.rest-super-sync.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.bailey.rest-super-sync.plist 2>/dev/null
+    launchctl load ~/Library/LaunchAgents/com.bailey.rest-super-sync.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bailey.rest-super-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/bailey/.local/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>-u</string>
+        <string>scripts/operations/rest_super_sync.py</string>
+        <string>--apply</string>
+        <string>--opportunistic</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/bailey/Pocketsmith/agent-smith</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/bailey/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bailey/Library/Logs/rest-super-sync.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bailey/Library/Logs/rest-super-sync.log</string>
+</dict>
+</plist>

@@ -7,6 +7,7 @@ from scripts.operations.rest_super_sync import (
     SYNC_LABEL,
     import_row,
     normalize_export_row,
+    days_since,
     parse_tab_list,
     reconcile,
     reset_anchor,
@@ -224,3 +225,11 @@ def test_anchor_dry_run_reports_without_writing():
     result = reset_anchor(client, 135650.88, "2026-09-08", apply=False)
     assert result["changed"] == "dry-run"
     assert client.puts == []
+
+
+def test_days_since_handles_today_and_missing():
+    from datetime import date, timedelta
+    assert days_since(date.today().isoformat()) == 0
+    assert days_since((date.today() - timedelta(days=4)).isoformat()) == 4
+    assert days_since(None) > 1000        # never applied -> always due
+    assert days_since("not-a-date") > 1000
